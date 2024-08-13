@@ -15,7 +15,7 @@ Should contain the following information will be stored in this KV: 'api-typeaut
 
 # Application
 
-Proxy Configuration:
+Should contain the following information will be stored in this KV: 'proxy-proxy_conf'
 
 - appID: The ID of the application
 - accId: The ID of the account
