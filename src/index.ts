@@ -1,4 +1,12 @@
-import { importJWK, jwtVerify } from 'jose';
+import { importJWK, jwtVerify } from "jose";
+import {
+	badRequest,
+	forbidden,
+	getAuthHeader,
+	internalServerError,
+	unacceptable,
+} from "./helpers";
+import type { appTypeKVObject, KeyDetails, KeyDetailsRemaining } from "./types";
 
 interface Env {
 	typeauth_keys: KVNamespace;
@@ -12,99 +20,79 @@ interface Env {
 	DB: D1Database;
 }
 
-interface KeyDetails {
-	rl: {
-		limit: number;
-		timeWindow: number;
-	};
-}
-interface KeyDetailsRemaining {
-	remaining: number;
-}
-interface KeyUsageEvent {
-	accID: string;
-	appID: string;
-	keyID: string;
-	appName: string;
-	success: number;
-	ipAddress: number;
-	userAgent: string;
-	metadata?: Record<string, unknown>;
-}
-
-interface KVMetadata {
-	act: boolean;
-	exp: number;
-	rl: { limit: number; timeWindow: number } | null;
-	rf: { amount: number; interval: number } | null;
-	re: number | null;
-	name: string;
-}
-
-interface appTypeKVObject {
-	appID: string;
-	headerName: string;
-	authType: string;
-	hostname: string;
-}
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		const host = request.headers.get('host');
+	async fetch(
+		request: Request,
+		env: Env,
+		ctx: ExecutionContext,
+	): Promise<Response> {
+		//Check if host is present in the request
+		const host = request.headers.get("host");
 		if (!host) {
 			return unacceptable();
 		}
-		const app_configuration = await env.proxy_conf.get(host, { type: 'json' });
+		const metadata = request.cf;
+		if (!metadata) {
+			return badRequest();
+		}
+		const ip = request.headers.get("cf-connecting-ip");
+
+		const metaPayload = { ...metadata, ip, host };
+		//Get the app configuration from the proxy_conf KV
+		const app_configuration = await env.proxy_conf.get(host, { type: "json" });
 		if (!app_configuration) {
 			return badRequest();
 		}
-		const { appID, headerName, authType, hostname } = app_configuration as appTypeKVObject;
-		const token = await getAuthHeader(headerName, request, authType);
+		//Get the appID, headerName, authType, hostname, emailDisp, LLMcache from the app configuration
+		const { appID, headerName, authType, hostname, emailDisp, LLMcache } =
+			app_configuration as appTypeKVObject;
+		//Get the token from the request
+		const token = await getAuthHeader(headerName, request, authType, env);
 
-		if (token instanceof Response) {
-			return token;
+		//Check if the token is a response
+		if (!token.success) {
+			return forbidden();
 		}
+		//Check if the authType is jwt
+		// if (authType === "jwt") {
+		// 	const keys = await env.app_jwt_keys.get(appID, { type: "json" });
+		// 	if (!keys) {
+		// 		return forbidden();
+		// 	}
 
-		if (authType === 'jwt') {
-			const keys = await env.app_jwt_keys.get(appID, { type: 'json' });
-			if (!keys) {
-				return forbidden();
-			}
-
-			let verified = false;
-			let jwtError = false;
-			for (let key of keys) {
-				const jwtKey = await importJWK(key);
-				try {
-					await jwtVerify(token.value, jwtKey);
-					verified = true;
-					break;
-				} catch (error) {
-					jwtError = true;
-				}
-			}
-			if (jwtError) {
-				return internalServerError();
-			}
-			if (!verified) {
-				return forbidden();
-			}
-			return await forwardRequest(hostname, request);  // Fixed this line
-		}
-
-		if (authType === 'type') {
-			let verificationSuccess = false;
-			let applicationID: string = '';
-			let keyId: string = '';
-			let accID: string = '';
+		// 	let verified = false;
+		// 	let jwtError = false;
+		// 	for (let key of keys) {
+		// 		const jwtKey = await importJWK(key);
+		// 		try {
+		// 			await jwtVerify(token.value, jwtKey);
+		// 			verified = true;
+		// 			break;
+		// 		} catch (error) {
+		// 			jwtError = true;
+		// 		}
+		// 	}
+		// 	if (jwtError) {
+		// 		return internalServerError();
+		// 	}
+		// 	if (!verified) {
+		// 		return forbidden();
+		// 	}
+		// 	return await forwardRequest(hostname, request); // Fixed this line
+		// }
+		//Check if the authType is opaque token
+		if (authType === "type") {
+			let applicationID: string = "";
+			let keyId: string = "";
+			let accID: string = "";
 			let jsonValue;
-			let IPAdd = 0;
-			if (request.headers.get('cf-connecting-ip') != null) {
-				let ip = request.headers.get('cf-connecting-ip') || '';
-				IPAdd = ipToDecimal(ip);
-			}
+			// if (request.headers.get("cf-connecting-ip") != null) {
+			// 	let ip = request.headers.get("cf-connecting-ip") || "";
+			// 	IPAdd = ipToDecimal(ip);
+			// }
 
-			if (token.value) {
-				jsonValue = JSON.parse(token.value);
+			if (token.data?.value) {
+				jsonValue = JSON.parse(token.data.value);
 				applicationID = jsonValue.appId;
 				keyId = jsonValue.id;
 				accID = jsonValue.accId;
@@ -113,18 +101,24 @@ export default {
 				return unauthorized();
 			}
 			if (token.metadata) {
-				if (!token.metadata.act) {
+				if (!token.data?.metadata?.act) {
 					return forbidden();
 				}
-				if (token.metadata.exp && token.metadata.exp < Date.now()) {
+				if (token.data?.metadata.exp && token.data?.metadata.exp < Date.now()) {
 					return forbidden();
 				}
 
-				let rlObject = { limit: token.metadata.rl?.limit, timeWindow: token.metadata.rl?.timeWindow, remaining: 0 };
+				let rlObject = {
+					limit: token.data.metadata.rl?.limit,
+					timeWindow: token.data.metadata.rl?.timeWindow,
+					remaining: 0,
+				};
 				if (token.metadata.rl != null) {
 					const id = env.RATE_LIMITER.idFromName(token.value);
 					const rateLimiter = env.RATE_LIMITER.get(id);
-					const response = await rateLimiter.fetch(new Request(`https://ratelimiter?key=${token}`));
+					const response = await rateLimiter.fetch(
+						new Request(`https://ratelimiter?key=${token}`),
+					);
 					const jsonResponse: { remaining: number } = await response.json();
 					rlObject.remaining = jsonResponse.remaining;
 					if (response.status === 429) {
@@ -134,15 +128,15 @@ export default {
 								appID: applicationID,
 								keyID: keyId,
 								appName: token.metadata.name,
-								userAgent: request.headers.get('user-agent') || '',
+								userAgent: request.headers.get("user-agent") || "",
 								ipAddress: IPAdd,
 								success: verificationSuccess ? 1 : 0,
 								metadata: {
-									userAgent: request.headers.get('user-agent') || '',
+									userAgent: request.headers.get("user-agent") || "",
 									ipAddress: IPAdd,
 								},
 							},
-							env
+							env,
 						);
 						return tooManyRequests();
 					} else if (response.status === 401) {
@@ -153,15 +147,25 @@ export default {
 				if (token.metadata.re != null) {
 					const id = env.REMAINING.idFromName(token.value);
 					const bucket = env.REMAINING.get(id);
-					const response = await bucket.fetch(new Request(`https://remainer?key=${token}`));
+					const response = await bucket.fetch(
+						new Request(`https://remainer?key=${token}`),
+					);
 					const jsonResponse: { remaining: number } = await response.json();
 					remaObject.remaining = jsonResponse.remaining;
 					if (response.status === 200) {
 						if (jsonResponse.remaining === 0) {
 							token.metadata.act = false;
 							jsonValue.enabled = false;
-							await env.typeauth_keys.put(token.value, JSON.stringify(jsonValue), { metadata: token.metadata });
-							const { success } = await env.DB.prepare('UPDATE keys SET enabled = false WHERE id = ?1').bind({ keyId }).run();
+							await env.typeauth_keys.put(
+								token.value,
+								JSON.stringify(jsonValue),
+								{ metadata: token.metadata },
+							);
+							const { success } = await env.DB.prepare(
+								"UPDATE keys SET enabled = false WHERE id = ?1",
+							)
+								.bind({ keyId })
+								.run();
 							if (!success) {
 								return internalServerError();
 							}
@@ -174,14 +178,14 @@ export default {
 								keyID: keyId,
 								appName: token.metadata.name,
 								ipAddress: IPAdd,
-								userAgent: request.headers.get('user-agent') || '',
+								userAgent: request.headers.get("user-agent") || "",
 								success: verificationSuccess ? 1 : 0,
 								metadata: {
-									userAgent: request.headers.get('user-agent') || '',
+									userAgent: request.headers.get("user-agent") || "",
 									ipAddress: IPAdd,
 								},
 							},
-							env
+							env,
 						);
 						return tooManyRequests();
 					} else if (response.status === 401) {
@@ -198,11 +202,11 @@ export default {
 						keyID: keyId,
 						appName: token.metadata.name,
 						ipAddress: IPAdd,
-						userAgent: request.headers.get('user-agent') || '',
+						userAgent: request.headers.get("user-agent") || "",
 						success: verificationSuccess ? 1 : 0,
 						metadata: {},
 					},
-					env
+					env,
 				);
 
 				await forwardRequest(hostname, request);
@@ -210,128 +214,7 @@ export default {
 		}
 		console.log(token);
 
-		return new Response('Hello World!');
-		// Helper function to get the Authorization header
-		async function getAuthHeader(
-			headerName: string,
-			request: Request,
-			authType: string
-		): Promise<{ value: string; metadata: KVMetadata | null } | Response> {
-			const authHeader = request.headers.get(headerName);
-			if (!authHeader || authHeader === undefined) {
-				return new Response('Unauthorized', {
-					status: 401,
-				});
-			}
-			const [type, key] = authHeader.split(' ');
-
-			if (type !== 'Bearer') {
-				return new Response('Unauthorized', {
-					status: 401,
-				});
-			}
-			if (authType === 'jwt') {
-				return { value: key, metadata: null };
-			}
-			const { value, metadata } = await env.typeauth_keys.getWithMetadata<KVMetadata>(key);
-			if (!value) {
-				return new Response('Forbidden', {
-					status: 403,
-				});
-			}
-			if (!metadata) {
-				return new Response('Forbidden', {
-					status: 403,
-				});
-			}
-			return { value, metadata };
-		}
-
-		//create a helper function that take a hostname and a request and forward the request to the backend
-		async function forwardRequest(hostname: string, request: Request): Promise<Response> {
-			const response = await fetch(hostname + request.url, {
-				method: request.method,
-				headers: request.headers,
-				body: request.body,
-			});
-			//the response should be not modified
-			return new Response(JSON.stringify(response), {
-				status: response.status,
-				statusText: response.statusText,
-				headers: response.headers,
-			});
-		}
-
-		//create a helper function to response when the request is not authorized
-		function unauthorized(): Response {
-			return new Response('Unauthorized', {
-				status: 401,
-			});
-		}
-		// create a helper function to response when the request is not found
-		function notFound(): Response {
-			return new Response('Not Found', {
-				status: 404,
-			});
-		}
-
-		// create a helper function to response when the request is forbidden
-		function forbidden(): Response {
-			return new Response('Forbidden', {
-				status: 403,
-			});
-		}
-		// create a helper function to response when the request is bad request
-		function badRequest(): Response {
-			return new Response('Bad Request', {
-				status: 400,
-			});
-		}
-
-		// create a helper function to response when the request is unacceptable
-		function unacceptable(): Response {
-			return new Response('Unacceptable', {
-				status: 406,
-			});
-		}
-
-		// create a helper function to response when the request is too long
-		function tooLong(): Response {
-			return new Response('Too Long', {
-				status: 413,
-			});
-		}
-
-		// create a helper function to response when the request is too many requests
-		function tooManyRequests(): Response {
-			return new Response('Too Many Requests', {
-				status: 429,
-			});
-		}
-
-		// create a helper function to response when the request is internal server error
-		function internalServerError(): Response {
-			return new Response('Internal Server Error', {
-				status: 500,
-			});
-		}
-
-		// create a helper function to response when the request is service unavailable
-		function serviceUnavailable(): Response {
-			return new Response('Service Unavailable', {
-				status: 503,
-			});
-		}
-		async function logKeyUsageEvent(event: KeyUsageEvent, env: Env): Promise<void> {
-			const { accID, appID, appName, keyID, success, metadata, ipAddress, userAgent } = event;
-			env.ANALYTICS.writeDataPoint({
-				blobs: [accID, appID, keyID, userAgent, appName],
-				doubles: [success, ipAddress],
-				indexes: [keyID],
-			});
-		}
-
-		// Helper function to gather headers and send to R2 bucket
+		return new Response("Hello World!");
 	},
 };
 
@@ -346,14 +229,14 @@ export class RateLimiter {
 
 	async fetch(request: Request): Promise<Response> {
 		const { searchParams } = new URL(request.url);
-		const key = searchParams.get('key');
-		const init = searchParams.get('init');
-		const set = searchParams.get('set');
+		const key = searchParams.get("key");
+		const init = searchParams.get("init");
+		const set = searchParams.get("set");
 
 		if (!key) {
-			return new Response(JSON.stringify({ error: 'Key is required' }), {
+			return new Response(JSON.stringify({ error: "Key is required" }), {
 				status: 400,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
@@ -361,16 +244,16 @@ export class RateLimiter {
 			await this.state.storage.put(key, set);
 			return new Response(JSON.stringify(set), {
 				status: 201,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 		// Retrieve the key details from storage or database
 		const keyDetails = await this.getKeyDetails(key);
 
 		if (!keyDetails) {
-			return new Response(JSON.stringify({ error: 'Invalid key' }), {
+			return new Response(JSON.stringify({ error: "Invalid key" }), {
 				status: 401,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
@@ -378,16 +261,22 @@ export class RateLimiter {
 
 		const now = Date.now() / 1000; // Current timestamp in seconds
 
-		const storageValue = await this.state.storage.get<{ value: number; expiration: number }>(key);
+		const storageValue = await this.state.storage.get<{
+			value: number;
+			expiration: number;
+		}>(key);
 		let value = storageValue?.value || 0;
 		let expiration = storageValue?.expiration || now + timeWindow;
 
 		if (now < expiration) {
 			if (value >= limit) {
-				return new Response(JSON.stringify({ error: 'Rate limit exceeded', remaining: 0 }), {
-					status: 429,
-					headers: { 'Content-Type': 'application/json' },
-				});
+				return new Response(
+					JSON.stringify({ error: "Rate limit exceeded", remaining: 0 }),
+					{
+						status: 429,
+						headers: { "Content-Type": "application/json" },
+					},
+				);
 			}
 			value++;
 		} else {
@@ -401,7 +290,7 @@ export class RateLimiter {
 
 		return new Response(JSON.stringify({ remaining }), {
 			status: 200,
-			headers: { 'Content-Type': 'application/json' },
+			headers: { "Content-Type": "application/json" },
 		});
 	}
 
@@ -425,14 +314,14 @@ export class Remaining {
 
 	async fetch(request: Request): Promise<Response> {
 		const { searchParams } = new URL(request.url);
-		const key = searchParams.get('key');
-		const set = searchParams.get('set');
-		const init = searchParams.get('init');
-		const get = searchParams.get('get');
+		const key = searchParams.get("key");
+		const set = searchParams.get("set");
+		const init = searchParams.get("init");
+		const get = searchParams.get("get");
 		if (!key) {
-			return new Response(JSON.stringify({ error: 'Key is required' }), {
+			return new Response(JSON.stringify({ error: "Key is required" }), {
 				status: 400,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
@@ -440,21 +329,21 @@ export class Remaining {
 			let remaining = await this.state.storage.get(key);
 			return new Response(JSON.stringify({ remaining: remaining }), {
 				status: 200,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
 		if (init) {
 			if (!set) {
-				return new Response(JSON.stringify({ error: 'set is missing' }), {
+				return new Response(JSON.stringify({ error: "set is missing" }), {
 					status: 401,
-					headers: { 'Content-Type': 'application/json' },
+					headers: { "Content-Type": "application/json" },
 				});
 			}
 			await this.state.storage.put(key, parseInt(set));
 			return new Response(JSON.stringify({ remaining: set }), {
 				status: 201,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
@@ -462,33 +351,36 @@ export class Remaining {
 		const keyDetails = await this.getKeyDetails(key);
 
 		if (!keyDetails) {
-			return new Response(JSON.stringify({ error: 'Invalid key' }), {
+			return new Response(JSON.stringify({ error: "Invalid key" }), {
 				status: 401,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
 		let remaining = await this.state.storage.get<number>(key);
 
 		if (remaining === undefined) {
-			return new Response(JSON.stringify({ error: 'Invalid key' }), {
+			return new Response(JSON.stringify({ error: "Invalid key" }), {
 				status: 401,
-				headers: { 'Content-Type': 'application/json' },
+				headers: { "Content-Type": "application/json" },
 			});
 		}
 
 		if (remaining <= 0) {
-			return new Response(JSON.stringify({ error: 'Usage limit exceeded', remaining: 0 }), {
-				status: 429,
-				headers: { 'Content-Type': 'application/json' },
-			});
+			return new Response(
+				JSON.stringify({ error: "Usage limit exceeded", remaining: 0 }),
+				{
+					status: 429,
+					headers: { "Content-Type": "application/json" },
+				},
+			);
 		}
 
 		await this.state.storage.put(key, remaining - 1);
 
 		return new Response(JSON.stringify({ remaining: remaining - 1 }), {
 			status: 200,
-			headers: { 'Content-Type': 'application/json' },
+			headers: { "Content-Type": "application/json" },
 		});
 	}
 
@@ -503,7 +395,7 @@ export class Remaining {
 
 function ipToDecimal(ipAddress: string): number {
 	// Split the IP address into octets (sections)
-	const octets = ipAddress.split('.');
+	const octets = ipAddress.split(".");
 
 	// Validate the format (4 octets, each between 0 and 255)
 	if (octets.length !== 4 || !octets.every((octet) => isValidOctet(octet))) {
@@ -512,12 +404,12 @@ function ipToDecimal(ipAddress: string): number {
 
 	// Convert each octet to a number and shift/add for final decimal value
 	return octets.reduce((decimal, octet, index) => {
-		const octetValue = parseInt(octet, 10);
-		return decimal + octetValue * Math.pow(256, 3 - index);
+		const octetValue = Number.parseInt(octet, 10);
+		return decimal + octetValue * (256 ** 3 - index);
 	}, 0);
 }
 
 function isValidOctet(octet: string): boolean {
-	const octetValue = parseInt(octet, 10);
-	return !isNaN(octetValue) && octetValue >= 0 && octetValue <= 255;
+	const octetValue = Number.parseInt(octet, 10);
+	return !Number.isNaN(octetValue) && octetValue >= 0 && octetValue <= 255;
 }

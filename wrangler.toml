@@ -25,6 +25,8 @@ MASTER_API_TOKEN = "kQKxubkN2RlmAULBl5Vr-f9fSNr832rNX"
 binding = "DB"                                       # i.e. available in your Worker on env.DB
 database_name = "dev-typeauth-9"
 database_id = "598b8b17-03aa-4f34-afda-55757ed1cab5"
+
+
 # Bind another Worker service. Use this binding to call another Worker without network overhead.
 # Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
 # [[services]]
