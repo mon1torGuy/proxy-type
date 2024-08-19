@@ -6,25 +6,20 @@ compatibility_flags = ["nodejs_compat"]
 
 kv_namespaces = [
     { binding = "typeauth_keys", id = "9744321d80574d39a97f2b82416e9951", preview_id = "9744321d80574d39a97f2b82416e9951" },
-    { binding = "app_jwt_keys", id = "abba62c0fb8a4f2f956f71f865f31e2f", preview_id = "abba62c0fb8a4f2f956f71f865f31e2f" },
     { binding = "refill_timestamp", id = "33cec523d07b4711b2f3be0f286ddef6", preview_id = "33cec523d07b4711b2f3be0f286ddef6" },
     { binding = "proxy_conf", id = "de34de446bae4219b0a4a734516025a5", preview_id = "de34de446bae4219b0a4a734516025a5" },
+]
+
+services = [
+    { binding = "RATELIMIT", service = "storage-state" },
+    { binding = "REMAIN", service = "storage-state" },
+    { binding = "LLMCACHE", service = "ai-cache" },
+    { binding = "ABUSE", service = "abuse" },
+
 
 ]
 
 analytics_engine_datasets = [{ binding = "ANALYTICS", dataset = "analytics" }]
-
-r2_buckets = [
-    { binding = "R2RAW", bucket_name = "rawrequests", preview_bucket_name = "rawrequests" },
-] # Bind an R2 Bucket. Use R2 to store arbitrarily large blobs of data, such as files.
-# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/#r2-buckets
-[vars]
-MASTER_API_TOKEN = "kQKxubkN2RlmAULBl5Vr-f9fSNr832rNX"
-
-[[d1_databases]]
-binding = "DB"                                       # i.e. available in your Worker on env.DB
-database_name = "dev-typeauth-9"
-database_id = "598b8b17-03aa-4f34-afda-55757ed1cab5"
 
 
 # Bind another Worker service. Use this binding to call another Worker without network overhead.
