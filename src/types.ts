@@ -59,7 +59,7 @@ export interface EmailDispType {
 	path: string[];
 	exceptions: string[];
 	blocklist: string[];
-	checkLocations: "body" | "header" | "query";
+	checkLocations: string;
 	checkPropertyName: string;
 }
 

@@ -1,3 +1,4 @@
+import { test } from "../example";
 import {
 	badRequest,
 	forbidden,
@@ -55,10 +56,12 @@ export default {
 		const host = request.headers.get("host");
 		const url = new URL(request.url);
 		const path = url.pathname;
+		const isMetric = url.searchParams.get("metrics");
 
 		if (!host) {
 			return unacceptable();
 		}
+
 		const metadata = request.cf;
 		if (!metadata) {
 			return badRequest();
@@ -68,20 +71,15 @@ export default {
 		const metaPayload = { ...metadata, ip, host };
 
 		const configStartTime = performance.now();
-
-		//Get the app configuration from the proxy_conf KV
 		const proxyConfiguration = (await env.proxy_conf.get(host, {
 			type: "json",
 		})) as unknown as appTypeKVObject;
+
 		metrics.configurationRetrieval = performance.now() - configStartTime;
-		console.log(proxyConfiguration);
-		console.log(host);
-		console.log(url);
-		console.log(path);
-		console.log(metaPayload);
 		if (!proxyConfiguration) {
 			return badRequest();
 		}
+		console.log("proxyConfiguration", proxyConfiguration);
 
 		//Check if all the proxyconfiguration properties are present and apply conditions
 		if (
@@ -104,7 +102,7 @@ export default {
 			proxyConfiguration.authType,
 			env,
 		);
-
+		console.log("tokenExtract", tokenExtract);
 		const token = tokenExtract.success ? tokenExtract.data : null;
 
 		if (!token) {
@@ -358,8 +356,15 @@ export default {
 			}
 		}
 		metrics.apiCache = performance.now() - apiCacheStartTime;
-		forwardRequest(proxyConfiguration.hostname, request);
+		///forwardRequest(proxyConfiguration.hostname, request);
 		metrics.total = performance.now() - startTime;
+
+		if (isMetric) {
+			return new Response(JSON.stringify(metrics), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		}
 
 		return new Response("Hello World!");
 	},

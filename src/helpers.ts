@@ -141,14 +141,14 @@ export async function forwardRequest(
 		headers: request.headers,
 		body: request.body,
 	});
-	//the response should be not modified
-	return new Response(JSON.stringify(response), {
+	response.headers.append("x-api", "typeauth");
+	const responseBody = await response.arrayBuffer();
+	return new Response(responseBody, {
 		status: response.status,
 		statusText: response.statusText,
 		headers: response.headers,
 	});
 }
-
 //create a helper function to response when the request is not authorized
 
 export async function logKeyUsageEvent(
