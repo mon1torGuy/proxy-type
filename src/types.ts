@@ -76,7 +76,9 @@ export interface JWTType {
 }
 export interface appTypeKVObject {
 	appID: string;
+	accID: string;
 	headerName: string;
+	detailResponse: boolean;
 	authType: string;
 	JWT: JWTType | null;
 	hostname: string;
@@ -110,7 +112,8 @@ type RemainResponse = {
 type LLMCacheResponse = {
 	success: boolean;
 	message: string;
-	data: string;
+	data?: string;
+	cache?: boolean;
 };
 
 type AbuseCheckResponse = {

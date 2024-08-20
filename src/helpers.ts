@@ -6,7 +6,23 @@ interface Env {
 	ANALYTICS: AnalyticsEngineDataset;
 }
 
-export function unauthorized(): Response {
+export function unauthorized(
+	detailResponse: boolean,
+	message: string,
+): Response {
+	if (detailResponse) {
+		return new Response(
+			JSON.stringify({
+				success: true,
+				message: "Unauthorized",
+				details: message,
+			}),
+			{
+				status: 401,
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+	}
 	return new Response(
 		JSON.stringify({ success: true, message: "Unauthorized" }),
 		{
@@ -24,14 +40,36 @@ export function notFound(): Response {
 }
 
 // create a helper function to response when the request is forbidden
-export function forbidden(): Response {
+export function forbidden(detailResponse: boolean, message: string): Response {
+	if (detailResponse) {
+		return new Response(
+			JSON.stringify({ success: true, message: "Forbidden", details: message }),
+			{
+				status: 403,
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+	}
 	return new Response(JSON.stringify({ success: true, message: "Forbidden" }), {
 		status: 403,
 		headers: { "Content-Type": "application/json" },
 	});
 }
 // create a helper function to response when the request is bad request
-export function badRequest(): Response {
+export function badRequest(detailResponse: boolean, message: string): Response {
+	if (detailResponse) {
+		return new Response(
+			JSON.stringify({
+				success: true,
+				message: "Bad Request",
+				details: message,
+			}),
+			{
+				status: 400,
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+	}
 	return new Response(
 		JSON.stringify({ success: true, message: "Bad Request" }),
 		{
@@ -61,7 +99,23 @@ export function tooLong(): Response {
 }
 
 // create a helper function to response when the request is too many requests
-export function tooManyRequests(): Response {
+export function tooManyRequests(
+	detailResponse: boolean,
+	message: string,
+): Response {
+	if (detailResponse) {
+		return new Response(
+			JSON.stringify({
+				success: true,
+				message: "Too Many Requests",
+				details: message,
+			}),
+			{
+				status: 429,
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+	}
 	return new Response(
 		JSON.stringify({ success: true, message: "Too Many Requests" }),
 		{
@@ -229,12 +283,14 @@ export async function handleAPICache(request: Request, ctx: ExecutionContext) {
 
 	// Try to get the response from cache
 	let response = await cache.match(cacheKey);
+	response?.headers.append("x-cache-typeauth", "HIT");
 
 	if (!response) {
 		console.log(`Cache miss for: ${request.url}`);
 		//@ts-expect-error
 		response = await fetch(request);
 		response = new Response(response?.body, response);
+		response.headers.append("x-cache-typeauth", "MISS");
 		response.headers.append("Cache-Control", "s-maxage=300");
 		ctx.waitUntil(cache.put(cacheKey, response.clone()));
 	}

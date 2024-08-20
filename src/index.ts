@@ -64,7 +64,7 @@ export default {
 
 		const metadata = request.cf;
 		if (!metadata) {
-			return badRequest();
+			return badRequest(true, "No metadata");
 		}
 		const ip = request.headers.get("cf-connecting-ip");
 		const userAgent = request.headers.get("user-agent");
@@ -77,7 +77,7 @@ export default {
 
 		metrics.configurationRetrieval = performance.now() - configStartTime;
 		if (!proxyConfiguration) {
-			return badRequest();
+			return badRequest(true, "No configuration");
 		}
 		console.log("proxyConfiguration", proxyConfiguration);
 
@@ -86,15 +86,19 @@ export default {
 			!proxyConfiguration.appID ||
 			!proxyConfiguration.headerName ||
 			!proxyConfiguration.authType ||
-			!proxyConfiguration.hostname
+			!proxyConfiguration.hostname ||
+			!proxyConfiguration.accID
 		) {
-			return badRequest();
+			return badRequest(
+				proxyConfiguration.detailResponse,
+				"Missing properties",
+			);
 		}
-
+		const accID = proxyConfiguration.accID;
 		const appID = proxyConfiguration.appID;
 		const headerName = proxyConfiguration.headerName;
 		const authStartTime = performance.now();
-
+		const detailResponse = proxyConfiguration.detailResponse;
 		const tokenExtractTime = performance.now();
 		const tokenExtract = await getAuthHeader(
 			headerName,
@@ -104,11 +108,10 @@ export default {
 		);
 		console.log("tokenExtract", tokenExtract);
 		const token = tokenExtract.success ? tokenExtract.data : null;
-
 		if (!token) {
-			return forbidden();
+			return forbidden(detailResponse, "No token");
 		}
-
+		console.log("there is token");
 		metrics.tokenExtraction = performance.now() - tokenExtractTime;
 		//First we apply authentication
 		// TODO: We need to implement JWT verification, create the table relation between the appID and the JWT and create the KV wich holds the JWKs
@@ -138,6 +141,8 @@ export default {
 		// 		return forbidden();
 		// 	}
 		// }
+		console.log(proxyConfiguration);
+		console.log("start auth");
 
 		if (proxyConfiguration.authType === "type") {
 			metrics.authentication = performance.now() - authStartTime;
@@ -159,11 +164,11 @@ export default {
 					},
 					env,
 				);
-				return forbidden();
+				return forbidden(detailResponse, "Key disabled");
 			}
 			// Check if application ID matches
 			if (KeyValue.appID !== proxyConfiguration.appID) {
-				return unauthorized();
+				return unauthorized(detailResponse, "Wrong appID");
 			}
 
 			// Check if the key is expired
@@ -181,7 +186,7 @@ export default {
 					},
 					env,
 				);
-				return forbidden();
+				return forbidden(detailResponse, "Key expired");
 			}
 			const rateLimitStartTime = performance.now();
 
@@ -204,7 +209,7 @@ export default {
 							},
 							env,
 						);
-						return tooManyRequests();
+						return tooManyRequests(detailResponse, "Request Ratelimited");
 					}
 				}
 			}
@@ -230,7 +235,7 @@ export default {
 							},
 							env,
 						);
-						return tooManyRequests();
+						return tooManyRequests(detailResponse, "Request Remain is 0");
 					}
 				}
 			}
@@ -267,12 +272,15 @@ export default {
 			}
 			metrics.refill = performance.now() - refillStartTime;
 		}
+		console.log("finish auth");
 
 		//Check for Abuse and Security
 		const abuseStartTime = performance.now();
+		console.log("start disp");
 
 		if (proxyConfiguration.emailDisp?.enabled) {
 			//Check if path match proxyConfiguration.emailDisp.path
+			console.log("path", path);
 			if (proxyConfiguration.emailDisp.path.includes(path)) {
 				let email = null;
 				// Get the email from the body
@@ -285,6 +293,7 @@ export default {
 				}
 				// Check if the email is in the header
 				if (proxyConfiguration.emailDisp.checkLocations === "header") {
+					console.log("header");
 					const headerEmail = request.headers.get(
 						proxyConfiguration.emailDisp.checkPropertyName,
 					);
@@ -303,19 +312,40 @@ export default {
 				}
 
 				if (!email) {
-					return forbidden();
+					console.log("no email");
+					return forbidden(detailResponse, "No email found");
 				}
 
 				const abuseCheclResult = await env.ABUSE.checkDisposable(email);
 				if (abuseCheclResult.success) {
+					console.log("check abuse failed");
+
 					if (abuseCheclResult.data === 1) {
-						return forbidden();
+						await logKeyUsageEvent(
+							{
+								accID: accID,
+								appID: appID,
+								keyID: accID,
+								appName: proxyConfiguration.hostname,
+								userAgent: userAgent || "",
+								ipAddress: ipToDecimal(metaPayload.ip || "0.0.0.0"),
+								eventType: "dispEmail",
+								success: 1,
+							},
+							env,
+						);
+
+						return forbidden(
+							detailResponse,
+							"Email is part of the disposable list",
+						);
 					}
 				}
 			}
 		}
 		metrics.abuseCheck = performance.now() - abuseStartTime;
 		const llmCacheStartTime = performance.now();
+		console.log("start llm");
 
 		if (proxyConfiguration.LLMCache?.enabled) {
 			// Check if path match proxyConfiguration.LLMCache.path
@@ -336,9 +366,25 @@ export default {
 
 				if (LLMCache.success) {
 					if (LLMCache.data) {
+						await logKeyUsageEvent(
+							{
+								accID: accID,
+								appID: appID,
+								keyID: accID,
+								appName: proxyConfiguration.hostname,
+								userAgent: userAgent || "",
+								ipAddress: ipToDecimal(metaPayload.ip || "0.0.0.0"),
+								eventType: LLMCache.cache ? "LLMCacheHit" : "LLMCacheMiss",
+								success: 1,
+							},
+							env,
+						);
 						return new Response(LLMCache.data, {
 							status: 200,
-							headers: { "Content-Type": "application/json" },
+							headers: {
+								"Content-Type": "application/json",
+								"x-cachellm-typeauth": "HIT",
+							},
 						});
 					}
 				}
@@ -346,13 +392,30 @@ export default {
 		}
 		metrics.llmCache = performance.now() - llmCacheStartTime;
 		const apiCacheStartTime = performance.now();
+		console.log("start apicahce");
 
 		if (proxyConfiguration.apiCache?.enabled) {
 			// Check if path match proxyConfiguration.apiCache.path
 			if (proxyConfiguration.apiCache.path.includes(path)) {
 				// Take the query from the JSON body
-
-				return await handleAPICache(request, ctx);
+				const response = await handleAPICache(request, ctx);
+				await logKeyUsageEvent(
+					{
+						accID: accID,
+						appID: appID,
+						keyID: accID,
+						appName: proxyConfiguration.hostname,
+						userAgent: userAgent || "",
+						ipAddress: ipToDecimal(metaPayload.ip || "0.0.0.0"),
+						eventType:
+							response.headers.get("x-cache-typeauth") === "HIT"
+								? "apiCacheHit"
+								: "apiCacheMiss",
+						success: 1,
+					},
+					env,
+				);
+				return response;
 			}
 		}
 		metrics.apiCache = performance.now() - apiCacheStartTime;
